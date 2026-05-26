@@ -1,0 +1,56 @@
+name: Update Dashboard Daily
+
+on:
+  schedule:
+    # Runs every day at 08:00 UTC (05:00 BRT)
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+    inputs:
+      date_from:
+        description: "Start date (YYYY-MM-DD) — leave blank for 1st of current month"
+        required: false
+      date_to:
+        description: "End date (YYYY-MM-DD) — leave blank for today"
+        required: false
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate dashboard
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+        run: |
+          if [ -n "${{ github.event.inputs.date_from }}" ]; then
+            python scripts/generate_dashboard.py \
+              "${{ github.event.inputs.date_from }}" \
+              "${{ github.event.inputs.date_to || '' }}"
+          else
+            python scripts/generate_dashboard.py
+          fi
+
+      - name: Commit updated dashboard
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/index.html
+          git diff --staged --quiet || git commit -m "chore: update dashboard $(date -u +%Y-%m-%d)"
+          git push
