@@ -523,8 +523,8 @@ function setLast30() {{
   applyFilter();
 }}
 
-// ── Init ─────────────────────────────────────────────────────────────────────
-applyFilter();
+// ── Init — abre no mês atual por padrão ─────────────────────────────────────
+setCurrentMonth();
 </script>
 </body>
 </html>"""
@@ -534,12 +534,12 @@ applyFilter();
 
 def main():
     today = date.today()
-    # Load a full month (or custom range) — user filters interactively in browser
+    # Load ALL history — user filters interactively in the browser
     if len(sys.argv) >= 3:
         d_from = datetime.strptime(sys.argv[1], "%Y-%m-%d").date()
         d_to   = datetime.strptime(sys.argv[2], "%Y-%m-%d").date()
     else:
-        d_from = date(today.year, today.month, 1)
+        d_from = date(2025, 1, 1)   # início de todo o histórico disponível
         d_to   = today
 
     print(f"Period: {d_from} → {d_to}", flush=True)
