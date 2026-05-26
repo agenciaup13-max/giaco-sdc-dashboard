@@ -95,12 +95,26 @@ def find_col(header, *names):
 
 def open_worksheet(gc, *name_candidates):
     ss = gc.open_by_key(SPREADSHEET_ID)
+    available = [ws.title for ws in ss.worksheets()]
+    print(f"Available worksheets: {available}", flush=True)
+    # Try exact candidates first
     for name in name_candidates:
         try:
             return ss.worksheet(name)
         except Exception:
             pass
-    raise RuntimeError(f"Worksheet not found. Tried: {name_candidates}")
+    # Try case-insensitive match
+    for name in name_candidates:
+        for ws in ss.worksheets():
+            if ws.title.lower().strip() == name.lower().strip():
+                return ws
+    # Try partial match
+    for name in name_candidates:
+        for ws in ss.worksheets():
+            if name.lower() in ws.title.lower() or ws.title.lower() in name.lower():
+                print(f"Partial match: '{ws.title}' for '{name}'", flush=True)
+                return ws
+    raise RuntimeError(f"Worksheet not found. Tried: {name_candidates}. Available: {available}")
 
 
 def read_meta_ads(gc, d_from, d_to):
