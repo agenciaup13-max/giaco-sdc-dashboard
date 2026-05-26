@@ -1,12 +1,13 @@
 """
 Dashboard Generator - Giaco SDC
 Reads "Queries Meta ads" and "leadscoring" from Google Sheets,
-cross-references both, and generates a static HTML dashboard.
+embeds raw data as JSON in the HTML so the user can filter by any date range
+interactively in the browser.
 """
 
 import json, os, sys
 from datetime import date, datetime, timedelta
-from collections import defaultdict, OrderedDict
+from collections import defaultdict
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -19,7 +20,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 
-# ─── helpers ────────────────────────────────────────────────────────────────
+# ─── auth ───────────────────────────────────────────────────────────────────
 
 def get_client():
     raw = os.environ.get("GOOGLE_CREDENTIALS")
@@ -28,6 +29,7 @@ def get_client():
     creds = Credentials.from_service_account_info(json.loads(raw), scopes=SCOPES)
     return gspread.authorize(creds)
 
+# ─── helpers ────────────────────────────────────────────────────────────────
 
 def parse_brl(v):
     if not v or str(v).strip() in ("", "Sem Dados", "#DIV/0!", "null", "#REF!"):
@@ -38,7 +40,6 @@ def parse_brl(v):
     except Exception:
         return 0.0
 
-
 def parse_num(v):
     if not v or str(v).strip() in ("", "Sem Dados", "#DIV/0!", "null", "#REF!"):
         return 0.0
@@ -47,7 +48,6 @@ def parse_num(v):
         return float(s)
     except Exception:
         return 0.0
-
 
 def parse_date(v):
     v = str(v).strip()
@@ -58,57 +58,26 @@ def parse_date(v):
             pass
     return None
 
-
-def fmt_brl(v):
-    if v == 0:
-        return "R$ 0,00"
-    s = f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    return "R$ " + s
-
-
-def fmt_int(v):
-    return f"{int(v):,}".replace(",", ".")
-
-
-def fmt_pct(v):
-    return f"{v:.2f}".replace(".", ",") + "%"
-
-
-def fmt_float2(v):
-    return f"{v:.2f}".replace(".", ",")
-
-
-def safe_div(a, b):
-    return a / b if b else 0.0
-
-
 def find_col(header, *names):
-    """Return index of first matching column name (case-insensitive)."""
     lnames = [n.lower() for n in names]
     for i, h in enumerate(header):
         if h.strip().lower() in lnames:
             return i
     return -1
 
-
-# ─── Google Sheets readers ───────────────────────────────────────────────────
-
 def open_worksheet(gc, *name_candidates):
     ss = gc.open_by_key(SPREADSHEET_ID)
     available = [ws.title for ws in ss.worksheets()]
     print(f"Available worksheets: {available}", flush=True)
-    # Try exact candidates first
     for name in name_candidates:
         try:
             return ss.worksheet(name)
         except Exception:
             pass
-    # Try case-insensitive match
     for name in name_candidates:
         for ws in ss.worksheets():
             if ws.title.lower().strip() == name.lower().strip():
                 return ws
-    # Try partial match
     for name in name_candidates:
         for ws in ss.worksheets():
             if name.lower() in ws.title.lower() or ws.title.lower() in name.lower():
@@ -116,29 +85,27 @@ def open_worksheet(gc, *name_candidates):
                 return ws
     raise RuntimeError(f"Worksheet not found. Tried: {name_candidates}. Available: {available}")
 
+# ─── readers ────────────────────────────────────────────────────────────────
 
 def read_meta_ads(gc, d_from, d_to):
     ws = open_worksheet(gc,
         "Queries Meta ads", "queries meta ads", "Queries Meta Ads",
-        "Query Meta Ads", "Meta Ads")
+        "Query Meta Ads", "Meta Ads", "queries_meta_ads")
     rows = ws.get_all_values()
     if len(rows) < 2:
         return []
-
     hdr = rows[0]
     c = {
         "day":   find_col(hdr, "Day", "Data", "Date"),
         "camp":  find_col(hdr, "Campaign Name", "campaign name"),
         "adset": find_col(hdr, "Ad Set Name", "Ad set name", "Adset Name"),
         "ad":    find_col(hdr, "Ad Name", "Ad name"),
-        "spend": find_col(hdr, "Amount Spent", "Gasto", "Spend",
-                          "Cost In Local Currency (Spend)"),
+        "spend": find_col(hdr, "Amount Spent", "Gasto", "Spend", "Cost In Local Currency (Spend)"),
         "imp":   find_col(hdr, "Impressions"),
         "clk":   find_col(hdr, "Link Clicks", "Clicks"),
         "leads": find_col(hdr, "Leads"),
         "reach": find_col(hdr, "Reach"),
     }
-
     def g(row, key):
         idx = c[key]
         return row[idx] if 0 <= idx < len(row) else ""
@@ -149,7 +116,7 @@ def read_meta_ads(gc, d_from, d_to):
         if d is None or not (d_from <= d <= d_to):
             continue
         out.append({
-            "date":        d,
+            "date":        str(d),
             "campaign":    g(row, "camp").strip(),
             "adset":       g(row, "adset").strip(),
             "ad":          g(row, "ad").strip(),
@@ -164,11 +131,11 @@ def read_meta_ads(gc, d_from, d_to):
 
 def read_leadscoring(gc, d_from, d_to):
     ws = open_worksheet(gc,
-        "leadscoring", "Leadscoring", "Lead Scoring", "lead scoring")
+        "leadscoring", "Leadscoring", "Lead Scoring", "lead scoring",
+        "lead_scoring", "LeadScoring")
     rows = ws.get_all_values()
     if len(rows) < 2:
         return []
-
     hdr = rows[0]
     c = {
         "nota":   find_col(hdr, "Nota"),
@@ -176,10 +143,7 @@ def read_leadscoring(gc, d_from, d_to):
         "camp":   find_col(hdr, "campaign_name", "CAMPANHA", "Campaign Name"),
         "adset":  find_col(hdr, "adset_name", "CONJUNTO", "Ad Set Name"),
         "ad":     find_col(hdr, "ad_name", "ANÚNCIO", "Ad Name"),
-        "compra": find_col(hdr, "Compra", "compra"),
-        "fat":    find_col(hdr, "FAT", "fat"),
     }
-
     def g(row, key):
         idx = c[key]
         return row[idx] if 0 <= idx < len(row) else ""
@@ -193,261 +157,22 @@ def read_leadscoring(gc, d_from, d_to):
         if nota not in ("A", "B", "C", "D", "E"):
             nota = ""
         out.append({
-            "date":     d,
+            "date":     str(d),
             "nota":     nota,
             "campaign": g(row, "camp").strip(),
             "adset":    g(row, "adset").strip(),
             "ad":       g(row, "ad").strip(),
-            "compra":   g(row, "compra").strip().upper() == "SIM",
-            "fat":      parse_brl(g(row, "fat")),
         })
     return out
 
-
-# ─── aggregation ────────────────────────────────────────────────────────────
-
-def make_row():
-    return dict(spend=0.0, impressions=0.0, clicks=0.0,
-                leads=0.0, reach=0.0,
-                leads_a=0, leads_b=0, leads_c=0, leads_d=0,
-                compras=0, fat=0.0)
-
-
-def calc(m):
-    s = m["spend"]; l = m["leads"]; imp = m["impressions"]
-    clk = m["clicks"]; la = m["leads_a"]
-    return {
-        **m,
-        "cpl":       safe_div(s, l),
-        "cpl_a":     safe_div(s, la),
-        "tx_a":      safe_div(la, l) * 100,
-        "cpm":       safe_div(s, imp) * 1000,
-        "cpc":       safe_div(s, clk),
-        "ctr":       safe_div(clk, imp) * 100,
-        "conv_form": safe_div(l, clk) * 100,
-        "roas":      safe_div(m["fat"], s),
-    }
-
-
-def aggregate(meta_rows, ls_rows):
-    # ── global
-    g = make_row()
-    for r in meta_rows:
-        for k in ("spend", "impressions", "clicks", "leads", "reach"):
-            g[k] += r[k]
-
-    # Frequency via daily reach sum
-    daily_reach = defaultdict(float)
-    for r in meta_rows:
-        daily_reach[r["date"]] += r["reach"]
-    g["reach"] = sum(daily_reach.values())
-    g["frequency"] = safe_div(g["impressions"], g["reach"]) if g["reach"] else 0
-
-    for r in ls_rows:
-        n = r["nota"]
-        if n == "A": g["leads_a"] += 1
-        elif n == "B": g["leads_b"] += 1
-        elif n == "C": g["leads_c"] += 1
-        elif n == "D": g["leads_d"] += 1
-        if r["compra"]:
-            g["compras"] += 1
-            g["fat"] += r["fat"]
-
-    global_metrics = calc(g)
-
-    # ── campaign / adset / ad breakdown
-    camps  = defaultdict(make_row)
-    adsets = defaultdict(make_row)   # key: (camp, adset)
-    ads    = defaultdict(make_row)   # key: (camp, adset, ad)
-
-    for r in meta_rows:
-        kc = r["campaign"]
-        ka = (r["campaign"], r["adset"])
-        kd = (r["campaign"], r["adset"], r["ad"])
-        for key, store in [(kc, camps), (ka, adsets), (kd, ads)]:
-            for k in ("spend", "impressions", "clicks", "leads", "reach"):
-                store[key][k] += r[k]
-
-    # Match leadscoring to meta rows by (campaign, adset, ad)
-    for r in ls_rows:
-        n = r["nota"]
-        kc = r["campaign"]
-        ka = (r["campaign"], r["adset"])
-        kd = (r["campaign"], r["adset"], r["ad"])
-
-        # Fuzzy match campaign if exact key missing
-        if kc not in camps:
-            match = next((k for k in camps if r["campaign"] in k or k in r["campaign"]), None)
-            if not match:
-                continue
-            kc = match
-            ka = (kc, r["adset"])
-            kd = (kc, r["adset"], r["ad"])
-
-        def bump(key, store):
-            if key not in store:
-                return
-            if n == "A": store[key]["leads_a"] += 1
-            elif n == "B": store[key]["leads_b"] += 1
-            elif n == "C": store[key]["leads_c"] += 1
-            elif n == "D": store[key]["leads_d"] += 1
-            if r["compra"]:
-                store[key]["compras"] += 1
-                store[key]["fat"] += r["fat"]
-
-        bump(kc, camps)
-        bump(ka, adsets)
-        bump(kd, ads)
-
-    # Build tree dict
-    tree = {}
-    for c_name in sorted(camps):
-        cm = calc(camps[c_name])
-        cm["name"] = c_name
-        cm["adsets"] = {}
-        for (cc, a_name) in sorted(k for k in adsets if k[0] == c_name):
-            am = calc(adsets[(cc, a_name)])
-            am["name"] = a_name
-            am["ads"] = {}
-            for (cc2, aa, ad_name) in sorted(k for k in ads if k[0] == c_name and k[1] == a_name):
-                dm = calc(ads[(cc2, aa, ad_name)])
-                dm["name"] = ad_name
-                am["ads"][ad_name] = dm
-            cm["adsets"][a_name] = am
-        tree[c_name] = cm
-
-    return global_metrics, tree
-
-
-def daily_trend(meta_rows, ls_rows, d_from, d_to):
-    days = OrderedDict()
-    d = d_from
-    while d <= d_to:
-        days[d] = {"spend": 0.0, "leads": 0.0, "leads_a": 0}
-        d += timedelta(days=1)
-    for r in meta_rows:
-        if r["date"] in days:
-            days[r["date"]]["spend"] += r["spend"]
-            days[r["date"]]["leads"] += r["leads"]
-    for r in ls_rows:
-        if r["date"] in days and r["nota"] == "A":
-            days[r["date"]]["leads_a"] += 1
-    return [
-        {"label": d.strftime("%d/%m"), "spend": round(days[d]["spend"], 2),
-         "leads": int(days[d]["leads"]), "leads_a": days[d]["leads_a"]}
-        for d in days
-    ]
-
-
 # ─── HTML ───────────────────────────────────────────────────────────────────
 
-COLS = [
-    ("Campanha / Conjunto / Anúncio", None, None),
-    ("Gasto",   "spend",   fmt_brl),
-    ("Leads",   "leads",   lambda v: fmt_int(int(v))),
-    ("CPL",     "cpl",     fmt_brl),
-    ("CPL-A",   "cpl_a",   lambda v: fmt_brl(v) if v > 0 else "—"),
-    ("Tx-A",    "tx_a",    fmt_pct),
-    ("Leads-A", "leads_a", lambda v: fmt_int(int(v))),
-    ("Leads-B", "leads_b", lambda v: fmt_int(int(v))),
-    ("Leads-C", "leads_c", lambda v: fmt_int(int(v))),
-    ("Leads-D", "leads_d", lambda v: fmt_int(int(v))),
-    ("CPM",     "cpm",     fmt_brl),
-    ("CTR",     "ctr",     fmt_pct),
-    ("CPC",     "cpc",     fmt_brl),
-]
-
-
-def row_tds(m):
-    return "".join(
-        f"<td>{fn(m.get(k, 0))}</td>"
-        for _, k, fn in COLS[1:]
-    )
-
-
-def shorten(s, n):
-    return (s[:n] + "…") if len(s) > n else s
-
-
-def render_tree(tree):
-    heads = "".join(f"<th>{label}</th>" for label, _, _ in COLS)
-    rows = []
-    camp_id = 0
-    for c_name, cm in tree.items():
-        camp_id += 1
-        cid = f"c{camp_id}"
-        rows.append(
-            f'<tr class="row-camp" data-id="{cid}">'
-            f'<td class="name-cell">'
-            f'<button class="toggle" onclick="toggleLevel(this,\'camp\',\'{cid}\')">▼</button>'
-            f'<span title="{c_name}">{shorten(c_name, 55)}</span></td>'
-            f"{row_tds(cm)}</tr>"
-        )
-        adset_id = 0
-        for a_name, am in cm["adsets"].items():
-            adset_id += 1
-            aid = f"{cid}_a{adset_id}"
-            rows.append(
-                f'<tr class="row-adset" data-id="{aid}" data-parent="{cid}">'
-                f'<td class="name-cell indent-1">'
-                f'<button class="toggle" onclick="toggleLevel(this,\'adset\',\'{aid}\')">▼</button>'
-                f'<span title="{a_name}">{shorten(a_name, 50)}</span></td>'
-                f"{row_tds(am)}</tr>"
-            )
-            for ad_name, dm in am["ads"].items():
-                rows.append(
-                    f'<tr class="row-ad" data-parent="{aid}">'
-                    f'<td class="name-cell indent-2">'
-                    f'<span title="{ad_name}">{shorten(ad_name, 45)}</span></td>'
-                    f"{row_tds(dm)}</tr>"
-                )
-    return (
-        '<table id="breakdown-table"><thead><tr>'
-        + heads
-        + "</tr></thead><tbody>"
-        + "".join(rows)
-        + "</tbody></table>"
-    )
-
-
-def gauge_bar(pct, label):
-    clamped = min(pct, 100)
-    color = "#4ade80" if pct >= 80 else "#fb923c" if pct >= 50 else "#f87171"
-    return (
-        f'<div class="gauge-wrap">'
-        f'<div class="gauge-bar"><div class="gauge-fill" style="width:{clamped:.1f}%;background:{color}"></div></div>'
-        f'<div class="gauge-label">{label}</div></div>'
-    )
-
-
-def generate_html(gm, tree, trend, d_from, d_to, generated_at):
-    period = f"{d_from.strftime('%d/%m/%Y')} — {d_to.strftime('%d/%m/%Y')}"
-    cpl_pct = safe_div(CPL_META, gm["cpl"]) * 100 if gm["cpl"] > 0 else 0
-    gauge_html = gauge_bar(cpl_pct,
-        f'{fmt_pct(cpl_pct)} da meta (R$ {int(CPL_META)},00)')
-    tree_html = render_tree(tree)
-    trend_json = json.dumps(trend)
-
-    # Pre-format all values to avoid complex f-string nesting
-    v = {
-        "spend":     fmt_brl(gm["spend"]),
-        "imp":       fmt_int(gm["impressions"]),
-        "cpm":       fmt_brl(gm["cpm"]),
-        "freq":      fmt_float2(gm.get("frequency", 0)),
-        "reach":     fmt_int(gm["reach"]),
-        "clicks":    fmt_int(gm["clicks"]),
-        "ctr":       fmt_pct(gm["ctr"]),
-        "cpc":       fmt_brl(gm["cpc"]),
-        "conv_form": fmt_pct(gm["conv_form"]),
-        "leads":     fmt_int(int(gm["leads"])),
-        "cpl":       fmt_brl(gm["cpl"]),
-        "tx_a":      fmt_pct(gm["tx_a"]),
-        "cpl_a":     fmt_brl(gm["cpl_a"]),
-        "leads_a":   str(gm["leads_a"]),
-        "leads_b":   str(gm["leads_b"]),
-        "leads_c":   str(gm["leads_c"]),
-        "leads_d":   str(gm["leads_d"]),
-    }
+def generate_html(meta_rows, ls_rows, d_from, d_to, generated_at):
+    meta_json = json.dumps(meta_rows, ensure_ascii=False)
+    ls_json   = json.dumps(ls_rows,   ensure_ascii=False)
+    d_from_str = str(d_from)
+    d_to_str   = str(d_to)
+    cpl_meta   = CPL_META
 
     return f"""<!DOCTYPE html>
 <html lang="pt-BR">
@@ -459,202 +184,347 @@ def generate_html(gm, tree, trend, d_from, d_to, generated_at):
 <style>
 *,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
 :root{{
-  --or:#f97316;--am:#fbbf24;--dark:#0f172a;--card:#1e293b;--card2:#162032;
-  --text:#e2e8f0;--muted:#94a3b8;--green:#4ade80;--red:#f87171;--border:#334155;
+  --or:#f97316;--am:#fbbf24;--dark:#0f172a;--card:#1e293b;
+  --text:#e2e8f0;--muted:#94a3b8;--border:#334155;
 }}
 body{{font-family:'Segoe UI',sans-serif;background:var(--dark);color:var(--text);min-height:100vh}}
-header{{background:linear-gradient(135deg,#ea580c 0%,#b45309 100%);padding:18px 32px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}}
-header h1{{font-size:1.5rem;font-weight:700;color:#fff}}
-header .period{{font-size:.82rem;color:rgba(255,255,255,.85);margin-top:3px}}
+header{{background:linear-gradient(135deg,#ea580c,#b45309);padding:16px 28px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}}
+header h1{{font-size:1.4rem;font-weight:700;color:#fff}}
 .updated{{font-size:.72rem;color:rgba(255,255,255,.65)}}
-.container{{max-width:1700px;margin:0 auto;padding:24px 18px}}
-.sec-title{{font-size:1.05rem;font-weight:700;color:var(--am);margin:30px 0 12px;text-transform:uppercase;letter-spacing:.06em;display:flex;align-items:center;gap:8px}}
+.container{{max-width:1700px;margin:0 auto;padding:20px 16px}}
+
+/* Date filter */
+.date-bar{{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px 20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:22px}}
+.date-bar label{{font-size:.82rem;color:var(--muted)}}
+.date-bar input[type=date]{{background:#0f172a;border:1px solid var(--border);border-radius:7px;color:var(--text);padding:6px 10px;font-size:.85rem}}
+.date-bar input[type=date]:focus{{outline:none;border-color:var(--or)}}
+.btn{{background:var(--or);color:#fff;border:none;border-radius:7px;padding:7px 18px;font-size:.85rem;font-weight:600;cursor:pointer}}
+.btn:hover{{background:#ea580c}}
+.btn-outline{{background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:7px;padding:7px 14px;font-size:.82rem;cursor:pointer}}
+.btn-outline:hover{{border-color:var(--or);color:var(--or)}}
+.period-label{{font-size:.8rem;color:var(--am);font-weight:600}}
+
+.sec-title{{font-size:1rem;font-weight:700;color:var(--am);margin:24px 0 10px;text-transform:uppercase;letter-spacing:.06em;display:flex;align-items:center;gap:8px}}
 .sec-title::after{{content:'';flex:1;height:1px;background:var(--border)}}
 
 /* Funnel cards */
-.funnel-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}}
-.fcard{{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px 18px}}
-.fcard .lbl{{font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px}}
-.fcard .val{{font-size:1.65rem;font-weight:700;color:#fff;line-height:1.1}}
-.fcard .sub{{font-size:.8rem;color:var(--muted);margin-top:5px}}
+.funnel-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}}
+.fcard{{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px 16px}}
+.fcard .lbl{{font-size:.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px}}
+.fcard .val{{font-size:1.55rem;font-weight:700;color:#fff;line-height:1.1}}
+.fcard .sub{{font-size:.78rem;color:var(--muted);margin-top:4px}}
 .fcard .sub b{{color:var(--am)}}
 .fcard.hi{{border-color:var(--or);background:linear-gradient(135deg,#1e1e3a,#2d1b00)}}
 .fcard.hi .val{{color:var(--am)}}
-
-/* Gauge */
-.gauge-wrap{{margin-top:10px}}
-.gauge-bar{{height:9px;background:#334155;border-radius:5px;overflow:hidden}}
-.gauge-fill{{height:100%;border-radius:5px;transition:width .5s ease}}
-.gauge-label{{font-size:.72rem;color:var(--muted);margin-top:4px}}
+.gauge-bar{{height:8px;background:#334155;border-radius:5px;overflow:hidden;margin-top:8px}}
+.gauge-fill{{height:100%;border-radius:5px;transition:width .4s ease}}
+.gauge-label{{font-size:.7rem;color:var(--muted);margin-top:3px}}
 
 /* Score chips */
-.chips{{display:flex;gap:10px;flex-wrap:wrap}}
-.chip{{border-radius:8px;padding:10px 18px;font-size:.88rem;font-weight:600}}
+.chips{{display:flex;gap:8px;flex-wrap:wrap}}
+.chip{{border-radius:8px;padding:9px 16px;font-size:.86rem;font-weight:600}}
 .ca{{background:#064e3b;color:#6ee7b7;border:1px solid #065f46}}
 .cb{{background:#1e3a8a;color:#93c5fd;border:1px solid #1d4ed8}}
 .cc{{background:#78350f;color:#fcd34d;border:1px solid #92400e}}
 .cd{{background:#3b0764;color:#d8b4fe;border:1px solid #6b21a8}}
 
 /* Chart */
-.chart-card{{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px}}
+.chart-card{{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px}}
 
 /* Table */
 .table-wrap{{overflow-x:auto;border-radius:12px;border:1px solid var(--border)}}
-#breakdown-table{{width:100%;border-collapse:collapse;font-size:.8rem;white-space:nowrap}}
-#breakdown-table thead tr{{background:var(--or);color:#fff}}
-#breakdown-table th{{padding:10px 12px;text-align:right;font-weight:600}}
-#breakdown-table th:first-child{{text-align:left;min-width:270px}}
-#breakdown-table td{{padding:8px 12px;text-align:right;border-bottom:1px solid #1e293b}}
-#breakdown-table td:first-child{{text-align:left}}
-.row-camp{{background:#162032;font-weight:600}}
-.row-camp td:first-child{{color:var(--am)}}
-.row-adset{{background:var(--card)}}
-.row-adset td:first-child{{color:#cbd5e1}}
-.row-ad{{background:#0d1b2a;font-size:.75rem}}
-.row-ad td:first-child{{color:var(--muted)}}
-.row-adset.collapsed,.row-ad.collapsed{{display:none}}
-.indent-1{{padding-left:24px!important}}
-.indent-2{{padding-left:48px!important}}
-.name-cell{{display:flex;align-items:center;gap:6px}}
-.toggle{{background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--muted);cursor:pointer;font-size:.65rem;padding:2px 5px;flex-shrink:0}}
-.toggle:hover{{background:var(--border)}}
-@media(max-width:600px){{header{{flex-direction:column}}.fcard .val{{font-size:1.3rem}}}}
+#bt{{width:100%;border-collapse:collapse;font-size:.79rem;white-space:nowrap}}
+#bt thead tr{{background:var(--or);color:#fff}}
+#bt th{{padding:9px 11px;text-align:right;font-weight:600}}
+#bt th:first-child{{text-align:left;min-width:260px}}
+#bt td{{padding:7px 11px;text-align:right;border-bottom:1px solid #1e293b}}
+#bt td:first-child{{text-align:left}}
+.rc{{background:#162032;font-weight:600}} .rc td:first-child{{color:var(--am)}}
+.ra{{background:var(--card)}} .ra td:first-child{{color:#cbd5e1}}
+.rd{{background:#0d1b2a;font-size:.75rem}} .rd td:first-child{{color:var(--muted)}}
+.rc.hide,.ra.hide,.rd.hide{{display:none}}
+.i1{{padding-left:22px!important}} .i2{{padding-left:44px!important}}
+.nc{{display:flex;align-items:center;gap:5px}}
+.tg{{background:transparent;border:1px solid var(--border);border-radius:3px;color:var(--muted);cursor:pointer;font-size:.62rem;padding:2px 4px;flex-shrink:0}}
+.tg:hover{{background:var(--border)}}
 </style>
 </head>
 <body>
 
 <header>
-  <div>
-    <h1>📊 Dashboard SDC — Giaco</h1>
-    <div class="period">📅 {period}</div>
-  </div>
-  <div class="updated">Atualizado: {generated_at}</div>
+  <div><h1>📊 Dashboard SDC — Giaco</h1></div>
+  <div class="updated">Gerado: {generated_at}</div>
 </header>
 
 <div class="container">
 
+  <!-- Date filter -->
+  <div class="date-bar">
+    <label>De</label>
+    <input type="date" id="d_from" value="{d_from_str}">
+    <label>Até</label>
+    <input type="date" id="d_to"   value="{d_to_str}">
+    <button class="btn" onclick="applyFilter()">Aplicar</button>
+    <button class="btn-outline" onclick="setCurrentMonth()">Mês atual</button>
+    <button class="btn-outline" onclick="setLast7()">Últimos 7 dias</button>
+    <button class="btn-outline" onclick="setLast30()">Últimos 30 dias</button>
+    <span class="period-label" id="period-label"></span>
+  </div>
+
   <div class="sec-title">Funil de Captura</div>
-  <div class="funnel-grid">
-
+  <div class="funnel-grid" id="funnel-grid">
+    <div class="fcard hi"><div class="lbl">Valor Gasto</div><div class="val" id="f-spend">—</div></div>
+    <div class="fcard"><div class="lbl">Impressões</div><div class="val" id="f-imp">—</div><div class="sub" id="f-cpm-freq">—</div></div>
+    <div class="fcard"><div class="lbl">Alcance</div><div class="val" id="f-reach">—</div></div>
+    <div class="fcard"><div class="lbl">Link Clicks</div><div class="val" id="f-clicks">—</div><div class="sub" id="f-ctr-cpc">—</div></div>
+    <div class="fcard"><div class="lbl">Conv. Formulário</div><div class="val" id="f-conv">—</div><div class="sub">Leads / Clicks</div></div>
     <div class="fcard hi">
-      <div class="lbl">Valor Gasto</div>
-      <div class="val">{v["spend"]}</div>
+      <div class="lbl">Leads Totais</div><div class="val" id="f-leads">—</div>
+      <div class="sub" id="f-cpl-sub">—</div>
+      <div class="gauge-bar"><div class="gauge-fill" id="gauge-fill" style="width:0%;background:#4ade80"></div></div>
+      <div class="gauge-label" id="gauge-label">—</div>
     </div>
-
-    <div class="fcard">
-      <div class="lbl">Impressões</div>
-      <div class="val">{v["imp"]}</div>
-      <div class="sub">CPM <b>{v["cpm"]}</b> &nbsp;|&nbsp; Freq. <b>{v["freq"]}</b></div>
-    </div>
-
-    <div class="fcard">
-      <div class="lbl">Alcance</div>
-      <div class="val">{v["reach"]}</div>
-    </div>
-
-    <div class="fcard">
-      <div class="lbl">Link Clicks</div>
-      <div class="val">{v["clicks"]}</div>
-      <div class="sub">CTR <b>{v["ctr"]}</b> &nbsp;|&nbsp; CPC <b>{v["cpc"]}</b></div>
-    </div>
-
-    <div class="fcard">
-      <div class="lbl">Conversão Formulário</div>
-      <div class="val">{v["conv_form"]}</div>
-      <div class="sub">Leads / Clicks</div>
-    </div>
-
-    <div class="fcard hi">
-      <div class="lbl">Leads Totais</div>
-      <div class="val">{v["leads"]}</div>
-      <div class="sub">CPL <b>{v["cpl"]}</b></div>
-      {gauge_html}
-    </div>
-
-    <div class="fcard">
-      <div class="lbl">Tx Lead-A</div>
-      <div class="val">{v["tx_a"]}</div>
-      <div class="sub">CPL-A <b>{v["cpl_a"]}</b></div>
-    </div>
-
+    <div class="fcard"><div class="lbl">Tx Lead-A</div><div class="val" id="f-txa">—</div><div class="sub" id="f-cpla-sub">—</div></div>
   </div>
 
-  <div class="sec-title">Lead Scoring</div>
+  <div class="sec-title" style="margin-top:22px">Lead Scoring</div>
   <div class="chips">
-    <div class="chip ca">🟢 Lead A &nbsp;<strong>{v["leads_a"]}</strong></div>
-    <div class="chip cb">🔵 Lead B &nbsp;<strong>{v["leads_b"]}</strong></div>
-    <div class="chip cc">🟡 Lead C &nbsp;<strong>{v["leads_c"]}</strong></div>
-    <div class="chip cd">🟣 Lead D &nbsp;<strong>{v["leads_d"]}</strong></div>
+    <div class="chip ca">🟢 Lead A &nbsp;<strong id="c-a">0</strong></div>
+    <div class="chip cb">🔵 Lead B &nbsp;<strong id="c-b">0</strong></div>
+    <div class="chip cc">🟡 Lead C &nbsp;<strong id="c-c">0</strong></div>
+    <div class="chip cd">🟣 Lead D &nbsp;<strong id="c-d">0</strong></div>
   </div>
 
-  <div class="sec-title" style="margin-top:30px">Evolução Diária</div>
-  <div class="chart-card">
-    <canvas id="trendChart" height="80"></canvas>
-  </div>
+  <div class="sec-title" style="margin-top:22px">Evolução Diária</div>
+  <div class="chart-card"><canvas id="trendChart" height="75"></canvas></div>
 
-  <div class="sec-title">Otimizações Meta Ads — Campanha / Conjunto / Anúncio</div>
-  <div class="table-wrap">
-    {tree_html}
-  </div>
+  <div class="sec-title" style="margin-top:22px">Meta Ads — Campanha / Conjunto / Anúncio</div>
+  <div class="table-wrap"><table id="bt">
+    <thead><tr>
+      <th>Campanha / Conjunto / Anúncio</th>
+      <th>Gasto</th><th>Leads</th><th>CPL</th>
+      <th>CPL-A</th><th>Tx-A</th>
+      <th>Leads-A</th><th>Leads-B</th><th>Leads-C</th><th>Leads-D</th>
+      <th>CPM</th><th>CTR</th><th>CPC</th>
+    </tr></thead>
+    <tbody id="tbl-body"></tbody>
+  </table></div>
 
-</div>
+</div><!-- /container -->
 
 <script>
-// ── Chart ──────────────────────────────────────────────────────────────────
-const TREND = {trend_json};
-(function(){{
-  const labels = TREND.map(r=>r.label);
-  new Chart(document.getElementById("trendChart"),{{
-    type:"bar",
+// ── Raw data embedded by Python ──────────────────────────────────────────────
+const RAW_META = {meta_json};
+const RAW_LS   = {ls_json};
+const CPL_META = {cpl_meta};
+
+// ── Formatters ───────────────────────────────────────────────────────────────
+const brl  = v => v === 0 ? 'R$ 0,00' : 'R$ ' + v.toFixed(2).replace('.', ',').replace(/\\B(?=(\\d{{3}})+(?!\\d))/g, '.');
+const num  = v => Math.round(v).toLocaleString('pt-BR');
+const pct  = v => v.toFixed(2).replace('.', ',') + '%';
+const sdiv = (a,b) => b ? a/b : 0;
+
+// ── Filter & aggregate ───────────────────────────────────────────────────────
+let trendChart = null;
+
+function applyFilter() {{
+  const from = document.getElementById('d_from').value;
+  const to   = document.getElementById('d_to').value;
+  if (!from || !to) return;
+
+  const meta = RAW_META.filter(r => r.date >= from && r.date <= to);
+  const ls   = RAW_LS.filter(r => r.date >= from && r.date <= to);
+
+  document.getElementById('period-label').textContent =
+    from.split('-').reverse().join('/') + ' — ' + to.split('-').reverse().join('/');
+
+  renderFunnel(meta, ls);
+  renderChips(ls);
+  renderTrend(meta, ls, from, to);
+  renderTable(meta, ls);
+}}
+
+function renderFunnel(meta, ls) {{
+  const spend = meta.reduce((s,r)=>s+r.spend,0);
+  const imp   = meta.reduce((s,r)=>s+r.impressions,0);
+  const clk   = meta.reduce((s,r)=>s+r.clicks,0);
+  const leads = meta.reduce((s,r)=>s+r.leads,0);
+  const reach = meta.reduce((s,r)=>s+r.reach,0);
+
+  const la = ls.filter(r=>r.nota==='A').length;
+  const lb = ls.filter(r=>r.nota==='B').length;
+  const lc = ls.filter(r=>r.nota==='C').length;
+  const ld = ls.filter(r=>r.nota==='D').length;
+
+  const cpl  = sdiv(spend,leads);
+  const cpla = sdiv(spend,la);
+  const cpm  = sdiv(spend,imp)*1000;
+  const cpc  = sdiv(spend,clk);
+  const ctr  = sdiv(clk,imp)*100;
+  const conv = sdiv(leads,clk)*100;
+  const freq = sdiv(imp,reach);
+  const txa  = sdiv(la,leads)*100;
+  const cplPct = cpl>0 ? Math.min(sdiv(CPL_META,cpl)*100,100) : 0;
+  const gaugeColor = cplPct>=80?'#4ade80':cplPct>=50?'#fb923c':'#f87171';
+
+  document.getElementById('f-spend').textContent  = brl(spend);
+  document.getElementById('f-imp').textContent    = num(imp);
+  document.getElementById('f-cpm-freq').innerHTML = `CPM <b>${{brl(cpm)}}</b> &nbsp;|&nbsp; Freq. <b>${{freq.toFixed(2).replace('.',',')}}</b>`;
+  document.getElementById('f-reach').textContent  = num(reach);
+  document.getElementById('f-clicks').textContent = num(clk);
+  document.getElementById('f-ctr-cpc').innerHTML  = `CTR <b>${{pct(ctr)}}</b> &nbsp;|&nbsp; CPC <b>${{brl(cpc)}}</b>`;
+  document.getElementById('f-conv').textContent   = pct(conv);
+  document.getElementById('f-leads').textContent  = num(leads);
+  document.getElementById('f-cpl-sub').innerHTML  = `CPL <b>${{brl(cpl)}}</b>`;
+  document.getElementById('f-txa').textContent    = pct(txa);
+  document.getElementById('f-cpla-sub').innerHTML = `CPL-A <b>${{brl(cpla)}}</b>`;
+  document.getElementById('gauge-fill').style.width = cplPct.toFixed(1)+'%';
+  document.getElementById('gauge-fill').style.background = gaugeColor;
+  document.getElementById('gauge-label').textContent = cplPct.toFixed(1)+'% da meta (R$ '+CPL_META+',00)';
+}}
+
+function renderChips(ls) {{
+  document.getElementById('c-a').textContent = ls.filter(r=>r.nota==='A').length;
+  document.getElementById('c-b').textContent = ls.filter(r=>r.nota==='B').length;
+  document.getElementById('c-c').textContent = ls.filter(r=>r.nota==='C').length;
+  document.getElementById('c-d').textContent = ls.filter(r=>r.nota==='D').length;
+}}
+
+function renderTrend(meta, ls, from, to) {{
+  // Build day list
+  const days = [];
+  let d = new Date(from + 'T00:00:00');
+  const end = new Date(to + 'T00:00:00');
+  while (d <= end) {{
+    days.push(d.toISOString().slice(0,10));
+    d.setDate(d.getDate()+1);
+  }}
+  const labels  = days.map(d => d.slice(5).replace('-','/'));
+  const spends  = days.map(d => meta.filter(r=>r.date===d).reduce((s,r)=>s+r.spend,0));
+  const leadsArr= days.map(d => meta.filter(r=>r.date===d).reduce((s,r)=>s+r.leads,0));
+  const laArr   = days.map(d => ls.filter(r=>r.date===d&&r.nota==='A').length);
+
+  if (trendChart) trendChart.destroy();
+  trendChart = new Chart(document.getElementById('trendChart'), {{
+    type:'bar',
     data:{{
       labels,
       datasets:[
-        {{label:"Gasto (R$)",data:TREND.map(r=>r.spend),backgroundColor:"rgba(249,115,22,.6)",borderColor:"#f97316",borderWidth:1,yAxisID:"y"}},
-        {{label:"Leads",data:TREND.map(r=>r.leads),type:"line",borderColor:"#fbbf24",backgroundColor:"rgba(251,191,36,.12)",tension:.35,fill:true,pointRadius:3,yAxisID:"y1"}},
-        {{label:"Leads A",data:TREND.map(r=>r.leads_a),type:"line",borderColor:"#4ade80",tension:.35,fill:false,pointRadius:3,yAxisID:"y1"}},
+        {{label:'Gasto (R$)',data:spends,backgroundColor:'rgba(249,115,22,.6)',borderColor:'#f97316',borderWidth:1,yAxisID:'y'}},
+        {{label:'Leads',data:leadsArr,type:'line',borderColor:'#fbbf24',backgroundColor:'rgba(251,191,36,.12)',tension:.35,fill:true,pointRadius:3,yAxisID:'y1'}},
+        {{label:'Leads A',data:laArr,type:'line',borderColor:'#4ade80',tension:.35,fill:false,pointRadius:3,yAxisID:'y1'}},
       ]
     }},
     options:{{
       responsive:true,
-      interaction:{{mode:"index",intersect:false}},
+      interaction:{{mode:'index',intersect:false}},
       scales:{{
-        x:{{ticks:{{color:"#94a3b8",maxRotation:45}},grid:{{color:"#1e293b"}}}},
-        y:{{position:"left",ticks:{{color:"#94a3b8",callback:v=>"R$"+v.toLocaleString("pt-BR")}},grid:{{color:"#1e293b"}}}},
-        y1:{{position:"right",ticks:{{color:"#94a3b8"}},grid:{{drawOnChartArea:false}}}},
+        x:{{ticks:{{color:'#94a3b8',maxRotation:45}},grid:{{color:'#1e293b'}}}},
+        y:{{position:'left',ticks:{{color:'#94a3b8',callback:v=>'R$'+v.toLocaleString('pt-BR')}},grid:{{color:'#1e293b'}}}},
+        y1:{{position:'right',ticks:{{color:'#94a3b8'}},grid:{{drawOnChartArea:false}}}},
       }},
-      plugins:{{legend:{{labels:{{color:"#e2e8f0"}}}},tooltip:{{bodyColor:"#e2e8f0",titleColor:"#fbbf24"}}}},
+      plugins:{{legend:{{labels:{{color:'#e2e8f0'}}}},tooltip:{{bodyColor:'#e2e8f0',titleColor:'#fbbf24'}}}},
     }}
   }});
-}})();
-
-// ── Table expand / collapse ─────────────────────────────────────────────────
-function toggleLevel(btn, level, id) {{
-  const isOpen = btn.textContent === "▼";
-  const tbody = document.querySelector("#breakdown-table tbody");
-  const rows = Array.from(tbody.rows);
-
-  if (level === "camp") {{
-    rows.filter(r => r.dataset.parent === id).forEach(r => {{
-      const opening = !isOpen;
-      r.classList.toggle("collapsed", !opening);
-      // always collapse grandchildren when toggling camp
-      if (!opening) {{
-        const aid = r.dataset.id;
-        if (aid) {{
-          rows.filter(rr => rr.dataset.parent === aid).forEach(rr => rr.classList.add("collapsed"));
-          const adBtn = r.querySelector(".toggle");
-          if (adBtn) adBtn.textContent = "▶";
-        }}
-      }}
-    }});
-  }} else {{
-    // adset: toggle direct ad children
-    rows.filter(r => r.dataset.parent === id).forEach(r => {{
-      r.classList.toggle("collapsed", isOpen);
-    }});
-  }}
-  btn.textContent = isOpen ? "▶" : "▼";
 }}
+
+function renderTable(meta, ls) {{
+  // Aggregate by campaign→adset→ad
+  const camps = {{}};
+  meta.forEach(r => {{
+    const kc = r.campaign, ka = kc+'|||'+r.adset, kd = ka+'|||'+r.ad;
+    [kc,ka,kd].forEach((k,i) => {{
+      if (!camps[k]) camps[k] = {{level:i,name:i===0?r.campaign:i===1?r.adset:r.ad,
+        parent:i===0?null:i===1?kc:ka,
+        spend:0,imp:0,clk:0,leads:0,reach:0,la:0,lb:0,lc:0,ld:0}};
+      camps[k].spend+=r.spend; camps[k].imp+=r.impressions;
+      camps[k].clk+=r.clicks; camps[k].leads+=r.leads; camps[k].reach+=r.reach;
+    }});
+  }});
+  ls.forEach(r => {{
+    const kc = r.campaign, ka = kc+'|||'+r.adset, kd = ka+'|||'+r.ad;
+    [kc,ka,kd].forEach(k => {{
+      // fuzzy match
+      let key = k;
+      if (!camps[key]) {{
+        key = Object.keys(camps).find(ck => ck.startsWith(r.campaign) || r.campaign.includes(ck.split('|||')[0]));
+      }}
+      if (!key || !camps[key]) return;
+      if (r.nota==='A') camps[key].la++;
+      else if (r.nota==='B') camps[key].lb++;
+      else if (r.nota==='C') camps[key].lc++;
+      else if (r.nota==='D') camps[key].ld++;
+    }});
+  }});
+
+  // Sort: camps first, then adsets, then ads
+  const order = Object.keys(camps).sort((a,b) => {{
+    const la = camps[a].level, lb2 = camps[b].level;
+    if (la !== lb2) return la - lb2;
+    return a.localeCompare(b);
+  }});
+
+  const shorten = (s,n) => s.length>n ? s.slice(0,n)+'…' : s;
+  const row = (k, m) => {{
+    const s=m.spend,l=m.leads,la=m.la;
+    const cpl=sdiv(s,l),cpla=sdiv(s,la),txa=sdiv(la,l)*100;
+    const cpm=sdiv(s,m.imp)*1000,cpc=sdiv(s,m.clk),ctr=sdiv(m.clk,m.imp)*100;
+    const cls = m.level===0?'rc':m.level===1?'ra':'rd';
+    const indent = m.level===0?'':m.level===1?' i1':' i2';
+    const toggle = m.level<2 ? `<button class="tg" onclick="tog(this,'${{k}}')">▼</button>` : '';
+    return `<tr class="${{cls}}" data-key="${{k}}" data-parent="${{m.parent||''}}">
+      <td class="nc${{indent}}">${{toggle}}<span title="${{m.name}}">${{shorten(m.name,m.level===0?55:m.level===1?48:42)}}</span></td>
+      <td>${{brl(s)}}</td><td>${{num(l)}}</td><td>${{brl(cpl)}}</td>
+      <td>${{la>0?brl(cpla):'—'}}</td><td>${{pct(txa)}}</td>
+      <td>${{la}}</td><td>${{m.lb}}</td><td>${{lc}}</td><td>${{m.ld}}</td>
+      <td>${{brl(cpm)}}</td><td>${{pct(ctr)}}</td><td>${{brl(cpc)}}</td>
+    </tr>`;
+  }};
+
+  document.getElementById('tbl-body').innerHTML = order.map(k=>row(k,camps[k])).join('');
+
+  // hide adsets & ads by default, show on click
+  document.querySelectorAll('#bt .ra,#bt .rd').forEach(r=>r.classList.add('hide'));
+}}
+
+function tog(btn, key) {{
+  const open = btn.textContent==='▼';
+  const rows = document.querySelectorAll(`#bt tr[data-parent="${{key}}"]`);
+  rows.forEach(r => {{
+    r.classList.toggle('hide', open);
+    // collapse grandchildren when closing
+    if (open) {{
+      const k2 = r.dataset.key;
+      if (k2) document.querySelectorAll(`#bt tr[data-parent="${{k2}}"]`).forEach(rr=>rr.classList.add('hide'));
+      const b2 = r.querySelector('.tg');
+      if (b2) b2.textContent='▼';
+    }}
+  }});
+  btn.textContent = open ? '▶' : '▼';
+}}
+
+// ── Date shortcuts ────────────────────────────────────────────────────────────
+function setCurrentMonth() {{
+  const t = new Date();
+  document.getElementById('d_from').value = `${{t.getFullYear()}}-${{String(t.getMonth()+1).padStart(2,'0')}}-01`;
+  document.getElementById('d_to').value   = t.toISOString().slice(0,10);
+  applyFilter();
+}}
+function setLast7() {{
+  const t=new Date(), f=new Date(t); f.setDate(f.getDate()-6);
+  document.getElementById('d_from').value=f.toISOString().slice(0,10);
+  document.getElementById('d_to').value=t.toISOString().slice(0,10);
+  applyFilter();
+}}
+function setLast30() {{
+  const t=new Date(), f=new Date(t); f.setDate(f.getDate()-29);
+  document.getElementById('d_from').value=f.toISOString().slice(0,10);
+  document.getElementById('d_to').value=t.toISOString().slice(0,10);
+  applyFilter();
+}}
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+applyFilter();
 </script>
 </body>
 </html>"""
@@ -664,6 +534,7 @@ function toggleLevel(btn, level, id) {{
 
 def main():
     today = date.today()
+    # Load a full month (or custom range) — user filters interactively in browser
     if len(sys.argv) >= 3:
         d_from = datetime.strptime(sys.argv[1], "%Y-%m-%d").date()
         d_to   = datetime.strptime(sys.argv[2], "%Y-%m-%d").date()
@@ -682,12 +553,8 @@ def main():
     ls_rows = read_leadscoring(gc, d_from, d_to)
     print(f"  {len(ls_rows)} rows", flush=True)
 
-    print("Aggregating…", flush=True)
-    gm, tree = aggregate(meta_rows, ls_rows)
-    trend = daily_trend(meta_rows, ls_rows, d_from, d_to)
-
     generated_at = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
-    html = generate_html(gm, tree, trend, d_from, d_to, generated_at)
+    html = generate_html(meta_rows, ls_rows, d_from, d_to, generated_at)
 
     out = os.path.join(os.path.dirname(__file__), "..", "docs", "index.html")
     os.makedirs(os.path.dirname(out), exist_ok=True)
