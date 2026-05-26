@@ -476,7 +476,7 @@ function renderTable(meta, ls) {{
       <td class="nc${{indent}}">${{toggle}}<span title="${{m.name}}">${{shorten(m.name,m.level===0?55:m.level===1?48:42)}}</span></td>
       <td>${{brl(s)}}</td><td>${{num(l)}}</td><td>${{brl(cpl)}}</td>
       <td>${{la>0?brl(cpla):'—'}}</td><td>${{pct(txa)}}</td>
-      <td>${{la}}</td><td>${{m.lb}}</td><td>${{lc}}</td><td>${{m.ld}}</td>
+      <td>${{m.la}}</td><td>${{m.lb}}</td><td>${{m.lc}}</td><td>${{m.ld}}</td>
       <td>${{brl(cpm)}}</td><td>${{pct(ctr)}}</td><td>${{brl(cpc)}}</td>
     </tr>`;
   }};
@@ -524,6 +524,8 @@ function setLast30() {{
 }}
 
 // ── Init — abre no mês atual por padrão ─────────────────────────────────────
+// Data mínima disponível nos dados históricos
+document.getElementById('d_from').min = '2025-01-01';
 setCurrentMonth();
 </script>
 </body>
