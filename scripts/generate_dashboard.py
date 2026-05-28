@@ -59,10 +59,11 @@ def parse_date(v):
     return None
 
 def find_col(header, *names):
-    lnames = [n.lower() for n in names]
-    for i, h in enumerate(header):
-        if h.strip().lower() in lnames:
-            return i
+    """Return index of first matching column — priority follows the order of names."""
+    for name in names:                          # try each candidate in priority order
+        for i, h in enumerate(header):
+            if h.strip().lower() == name.lower():
+                return i
     return -1
 
 def open_worksheet(gc, *name_candidates):
@@ -106,6 +107,10 @@ def read_meta_ads(gc, d_from, d_to):
         "leads": find_col(hdr, "Leads"),
         "reach": find_col(hdr, "Reach"),
     }
+    print(f"  meta_ads cols → day={c['day']} camp={c['camp']} adset={c['adset']} "
+          f"ad={c['ad']} spend={c['spend']} imp={c['imp']} clk={c['clk']} "
+          f"leads={c['leads']} reach={c['reach']}", flush=True)
+
     def g(row, key):
         idx = c[key]
         return row[idx] if 0 <= idx < len(row) else ""
@@ -138,12 +143,17 @@ def read_leadscoring(gc, d_from, d_to):
         return []
     hdr = rows[0]
     c = {
-        "nota":   find_col(hdr, "Nota"),
-        "date":   find_col(hdr, "DATA", "Data", "created_time", "date"),
-        "camp":   find_col(hdr, "campaign_name", "CAMPANHA", "Campaign Name"),
-        "adset":  find_col(hdr, "adset_name", "CONJUNTO", "Ad Set Name"),
-        "ad":     find_col(hdr, "ad_name", "ANÚNCIO", "Ad Name"),
+        "nota":  find_col(hdr, "Nota"),
+        # created_time = data exata da API Meta (prioridade máxima)
+        # DATA = coluna manual preenchida pelo time (fallback)
+        "date":  find_col(hdr, "created_time", "DATA", "Data", "date"),
+        # campaign_name = nome completo da Meta API (igual ao Queries Meta ads)
+        "camp":  find_col(hdr, "campaign_name", "CAMPANHA", "Campaign Name"),
+        "adset": find_col(hdr, "adset_name",   "CONJUNTO", "Ad Set Name"),
+        "ad":    find_col(hdr, "ad_name",       "ANÚNCIO",  "Ad Name"),
     }
+    print(f"  leadscoring cols → nota={c['nota']} date={c['date']} "
+          f"camp={c['camp']} adset={c['adset']} ad={c['ad']}", flush=True)
     def g(row, key):
         idx = c[key]
         return row[idx] if 0 <= idx < len(row) else ""
